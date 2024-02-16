@@ -1,0 +1,323 @@
+###########################################################################
+############################# Import libraries ############################
+###########################################################################
+
+import os
+import csv
+import pandas as pd
+from impala.util import as_pandas
+import numpy as np
+from joblib import dump, load
+from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+from moduls.custom_functions import *
+from moduls.data_hub import setup_remote_sql
+from moduls.reduce_mem_usage import reduce_mem_usage
+
+###########################################################################
+############################## Set datetime ###############################
+###########################################################################
+
+TDAY = pd.datetime.now().strftime('%d-%m-%Y')
+print('The date is: ', TDAY)
+
+###########################################################################
+################################ Functions ################################
+###########################################################################
+
+def score_max(x):
+  if x['max_score'] == x['Fiction_score']:
+    return 'Fiction'
+  elif x['max_score'] == x['Multi_score']:
+    return 'Multi'
+  elif x['max_score'] == x['Sport_score']:
+    return 'Sport'
+  elif x['max_score'] == x['Fiction_score'] and x['max_score'] == x['Multi_score']:
+    return 'Multi'
+  elif x['max_score'] == x['Fiction_score'] and x['max_score'] == x['Sport_score']:
+    return 'Multi'
+  elif x['max_score'] == x['Sport_score'] and x['max_score'] == x['Multi_score']:
+    return 'Multi'
+  else:
+    return 'no_score'
+  
+###########################################################################
+############################ Load the DM Scores ###########################
+###########################################################################
+
+# load the DM score of the Binary Model
+file1 = pd.read_csv('./Scores/direct_marketing_scoring_decile_02_2024.csv', sep=';', header=None)
+file1 = file1.rename(columns={0:'id_ags',1:'Sky_score',2:'Decile_sky',3:'date'})
+file1 = file1[['id_ags' , 'Sky_score' , 'Decile_sky']]
+file1.head()
+
+# load the DM score of the Three Class Model
+file2 = pd.read_csv('./Scores/direct_marketing_scoring_deciles_2024_03.csv', sep=';', header=None)
+file2 = file2.rename(columns={0:'id_ags',1:'Fiction_score', 2:'Fiction',
+                              3:'Multi_score', 4:'Multi', 5: 'Sport_score', 
+                              6: 'Sport', 7: 'Date'})
+file2 = file2[['id_ags', 'Fiction_score', 'Fiction','Multi_score','Multi',
+               'Sport_score','Sport']]
+
+file2.head()
+
+###########################################################################
+########################## Prepare the CSV file ###########################
+###########################################################################
+
+# get a copy of the second file score
+scored_dm = file2.copy()
+scored_dm.shape
+scored_dm.head()
+scored_dm.tail(15)
+scored_dm.isnull().sum()
+
+# create three seperate data frames with the features 
+# in order to calculate the max of the score features
+# by keeping the score featuers only in the initial one
+
+scored_dm_idags = scored_dm[['id_ags']]
+scored_dm_deciles = scored_dm[['id_ags','Fiction','Multi','Sport']]
+
+scored_dm = scored_dm[['Fiction_score','Multi_score','Sport_score']]
+scored_dm.head()
+scored_dm.shape
+
+# calculate the maximum values of each row
+scored_dm['max_score'] = scored_dm.max(axis=1)
+
+# apply the function that returns the name of the class that
+# corresponds to max score for each row
+scored_dm['Score'] = scored_dm.apply(score_max, axis=1)
+
+# check the data frame
+scored_dm.head()
+scored_dm.shape
+scored_dm.isnull().sum()
+
+scored_dm['Score'].value_counts()
+
+# add the id_ags feature to the data frame and drop the score features
+scored = pd.concat([scored_dm_idags, scored_dm], axis=1).drop(columns=['Fiction_score','Multi_score','Sport_score'])
+
+# convert the feature score to string
+scored['Score'] = scored['Score'].astype(str)
+scored.dtypes
+scored.head()
+scored.tail(15)
+
+# add the score deciles (optional)
+# scored = scored.merge(scored_dm_deciles, how='inner', on='id_ags')
+# scored.head()
+
+# add the scores of the binary model
+scored = scored.merge(file1, how='inner', on='id_ags')
+scored.head()
+scored.shape
+scored.isnull().sum()
+scored[scored.duplicated()]
+
+# select only the necessary columns
+decile_all_score = scored[['id_ags','Sky_score','Decile_sky','Score']]
+decile_all_score.head()
+decile_all_score.tail(10)
+decile_all_score.shape
+decile_all_score.Decile_sky.value_counts()
+
+# create a flag of int type as a replacement for the score feature
+
+conditions= [(decile_all_score['Score']=='Fiction'),
+             (decile_all_score['Score']=='Multi'),
+             (decile_all_score['Score']=='Sport')]   
+
+values = [1,2,3]
+
+decile_all_score['Score_flg'] = np.select(conditions,values)
+
+decile_all_score.head(10)
+decile_all_score.tail(15)
+
+decile_all_score = decile_all_score[['id_ags','Sky_score','Decile_sky','Score_flg']]
+decile_all_score.head()
+
+# get a copy of the data frame
+
+df_scores = decile_all_score.copy()
+
+# add three zero columns
+df_scores['col5']=0
+df_scores['col6']=0
+df_scores['col7']=0
+
+df_scores.head()
+
+# create a csv file of the data frame
+df_scores.to_csv('./Output/Sky_Scores_Deciles_2024_02.csv', sep=';', index=None)
+
+#################################### End ##################################
+
+#################################### Email to Send ##################################
+#  Hi Nidhi,
+#
+#   I prepared the new csv file containing the DD scores, 
+#    which is in alignment with the layout of the table in Unica interface. 
+#   It is located now in my folder in trans.
+#   The results score data has the format as below:
+#
+#  Column name	  Variable name	   Field name in Unica			
+#  Column 1	       id_ags				
+#  Column 2	       Sky Score	          Score_1			
+#  Column 3	       Decile Sky	          Decile_1			
+#  Column 4	       Score flg	          Score_2			
+#  Column 5	       Col5	                Decile_2			
+#  Column 6	       Col6	                Score_3			
+#  Column 7	       Col7	                Decile_3			
+#  
+#  Only the first 4 columns contains actually outcomes. 
+#  The last three contains the value 0. 
+#  The 4th column with the variable name Score_flg contains 
+#  only the three different values 1,2,3,
+#  which are corresponding to the following classes: 
+#  1: Fiction
+#  2: Multi
+#  3: Sport
+#  So in this field is provided the info for every id_ags: 
+#  In which class the best score is achieved…
+# 
+#  Thank you very much in advance!
+#  
+#  Best Regards,
+#  Christos 
+#####################################################################################
+
+
+
+
+
+
+
+
+
+# ----- check -------- #
+df_scores = pd.read_csv('./Output/Sky_Scores_Deciles_022023.csv', sep=';')
+df_scores.head()
+df_scores.tail(13)
+df_scores.dtypes
+df_scores.shape
+
+df_sample = pd.read_csv('./data/samples_noExclusions.csv', sep=';')
+df_sample.head()
+df_sample.shape
+
+dfm = df_sample.merge(df_scores, how='inner', on='id_ags')
+dfm.head()
+dfm.shape
+dfm.tail(15)
+
+################################################################################
+#################################################################################
+############ Load the Table from Hue and Save them in CDSW #####################
+#################################################################################
+
+# set up connection to impala
+
+sql = setup_remote_sql()
+
+start = time.time()
+
+sql_query = """
+   SELECT *
+   FROM aa_work.ck_microdialog_size;
+ """
+
+# execute query
+sql.execute(sql_query)
+
+# save data as pandas dataframe
+df = as_pandas(sql)
+print(">> {:.3f} seconds to fetch training data from data hub (using impyla).".format(time.time()-start))
+
+# reduce memory usage
+start = time.time()
+df = reduce_mem_usage(df)
+print(">> {:.3f} seconds to reduce memory usage.".format(time.time()-start))
+
+# view head of table
+df.head()
+
+# save data to gzip
+#df.to_pickle("./data/mailing_data/microdialog_address_idags.gz")
+df.to_pickle("./data/ck_microdialog_size")
+
+###################################################################
+# set up connection to impala
+
+sql = setup_remote_sql()
+
+start = time.time()
+
+sql_query = """
+   SELECT *
+   FROM aa_work.ck_cable_id_ags;
+ """
+
+# execute query
+sql.execute(sql_query)
+
+# save data as pandas dataframe
+df1 = as_pandas(sql)
+print(">> {:.3f} seconds to fetch training data from data hub (using impyla).".format(time.time()-start))
+
+# reduce memory usage
+start = time.time()
+df1 = reduce_mem_usage(df1)
+print(">> {:.3f} seconds to reduce memory usage.".format(time.time()-start))
+
+# view head of table
+df1.head()
+
+# save data to gzip
+#df.to_pickle("./data/id_ags_all.gz")
+
+###################################################################
+
+df=load("./data/ck_microdialog_size")
+
+df.head()
+df.shape
+
+df['id_ags'] = df['id_ags'].astype(int)
+df1['id_ags'] = df1['id_ags'].astype(int)
+
+dfm= df.merge(df_scores, how ='left', on = 'id_ags')
+dfm.head()
+dfm.shape
+
+#keep= ['id_ags',
+#       'a_hh_priv',
+#       'plz',
+#       'Sky_Score',
+#       'Decile_Sky',
+ #      'Score_flg'
+#      ]
+
+#df_cable=dfm[keep]
+#df_cable.tail()
+
+#df_cable.groupby(['Decile_Sky']).count()
+
+df_fin=df1.merge(dfm,how='left',on='id_ags')
+df_fin.head()
+df_fin.shape
+
+dfm['a_hh_priv'].sum()
+dfm.groupby(['Decile_Sky','vfk_tech','k_geb_groesse','k_wv_mz'])['a_hh_priv'].sum().astype(int)
+
+df.to_csv('./Output/HH_Deciles_Size_032023.csv', sep=';', index=None)
+data.head()
+dfm.groupby('Score_flg')['a_hh_priv'].sum().astype(int)
+dfm.groupby(['Decile_Sky','Score_flg'])['a_hh_priv'].sum().astype(int)
+
+################################## END #######################################
